@@ -78,7 +78,7 @@ interface IBMX is IERC20 {
         uint256 _minGlp
     ) external returns (uint256);
 
-    function unstakeAndRedeemGlp(
+    function unstakeAndRedeemSlt(
         address _tokenOut,
         uint256 _glpAmount,
         uint256 _minOut,
@@ -141,7 +141,7 @@ interface IBMX is IERC20 {
 
     function getPairAmount(address, uint256) external view returns (uint256);
 
-    function mintAndStakeGlp(
+    function mintAndStakeSlt(
         address,
         uint256,
         uint256,

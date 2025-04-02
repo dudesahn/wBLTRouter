@@ -8,24 +8,13 @@ import {IFactoryRegistry, IPoolFactory, IPool} from "./interfaces/AerodromeInter
 import {IERC20, IWETH, IBMX, VaultAPI, IShareHelper} from "./interfaces/BMXInterfaces.sol";
 
 /**
- * @title wBLT Router V2
- * @notice This contract simplifies conversions between wBLT, BMX, and other assets
- *  using wBLT's underlying tokens as virtual pools with wBLT. V2 built on top of Aerodrome.
+ * @title wSLT Router
+ * @notice This contract simplifies zapping in and out of wSLT.
  */
 
-contract wBLTRouterV2 is Ownable2Step {
-    struct Route {
-        address from;
-        address to;
-        bool stable;
-    }
-
-    /// @notice Aerodrome V2 (vAMM/sAMM) pool factory
-    address public constant defaultFactory =
-        0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
-
+contract wSLTRouter is Ownable2Step {
     IWETH public constant weth =
-        IWETH(0x4200000000000000000000000000000000000006);
+        IWETH(0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38);
     uint256 internal immutable PRICE_PRECISION;
     uint256 internal immutable BASIS_POINTS_DIVISOR;
 
@@ -34,25 +23,25 @@ contract wBLTRouterV2 is Ownable2Step {
 
     // contracts used for wBLT mint/burn
     VaultAPI internal constant wBLT =
-        VaultAPI(0x4E74D4Db6c0726ccded4656d0BCE448876BB4C7A);
+        VaultAPI(0x2dDCF85D3Cf27DEA338e0371D38409Ba80058630);
 
     IBMX internal constant sBLT =
-        IBMX(0x64755939a80BC89E1D2d0f93A312908D348bC8dE);
+        IBMX(0x47cd080014fF0ebB097F49cF1303ad088eBFCFcb);
 
     IBMX internal constant rewardRouter =
-        IBMX(0x49A97680938B4F1f73816d1B70C3Ab801FAd124B);
+        IBMX(0x0DF4DbeB0aeABbBB95cC600E7a268125A0Bb8064);
 
     IBMX internal constant morphexVault =
-        IBMX(0xec8d8D4b215727f3476FF0ab41c406FA99b4272C);
+        IBMX(0x9cC4E8e60a2c9a67Ac7D20f54607f98EfBA38AcF);
 
     IBMX internal constant bltManager =
-        IBMX(0x9fAc7b75f367d5B35a6D6D0a09572eFcC3D406C5);
+        IBMX(0xC608188e753b1e9558731724b7F7Cdde40c3b174);
 
     IBMX internal constant vaultUtils =
-        IBMX(0xec31c83C5689C66cb77DdB5378852F3707022039);
+        IBMX(0x5174c02f20fe8b2da3E3A64FA7df5596cEF9BaD2);
 
     IShareHelper internal constant shareValueHelper =
-        IShareHelper(0x4d2ED72285206D2b4b59CDA21ED0a979ad1F497f);
+        IShareHelper(0x4AEb2138203b6DDAF52Cc3Ff64d7ad156482B2aa);
 
     constructor() {
         // do approvals for wBLT
@@ -63,11 +52,6 @@ contract wBLTRouterV2 is Ownable2Step {
 
         PRICE_PRECISION = morphexVault.PRICE_PRECISION();
         BASIS_POINTS_DIVISOR = morphexVault.BASIS_POINTS_DIVISOR();
-    }
-
-    modifier ensure(uint256 _deadline) {
-        require(_deadline >= block.timestamp, "Router: EXPIRED");
-        _;
     }
 
     // only accept ETH via fallback from the WETH contract
@@ -97,293 +81,6 @@ contract wBLTRouterV2 is Ownable2Step {
             IERC20 token = IERC20(morphexVault.allWhitelistedTokens(i));
             token.approve(address(bltManager), type(uint256).max);
             bltTokens.push(address(token));
-        }
-    }
-
-    /**
-     * @notice Performs chained getAmountOut calculations on any number of pools.
-     * @dev This is mainly used when conducting swaps.
-     * @param _amountIn The amount of our first token to swap.
-     * @param _routes Array of structs that we use for our swap path.
-     * @return amounts Amount of each token in the swap path.
-     */
-    function getAmountsOut(
-        uint256 _amountIn,
-        Route[] memory _routes
-    ) public view returns (uint256[] memory amounts) {
-        require(_routes.length >= 1, "Router: INVALID_PATH");
-        amounts = new uint256[](_routes.length + 1);
-        amounts[0] = _amountIn;
-        for (uint256 i = 0; i < _routes.length; i++) {
-            // check if we need to convert to or from wBLT
-            if (_routes[i].from == address(wBLT)) {
-                // check to make sure it's one of the tokens in BLT
-                if (_isBLTToken(_routes[i].to)) {
-                    amounts[i + 1] = getRedeemAmountWrappedBLT(
-                        _routes[i].to,
-                        amounts[i],
-                        false
-                    );
-                    continue;
-                }
-            } else if (_routes[i].to == address(wBLT)) {
-                // check to make sure it's one of the tokens in BLT
-                if (_isBLTToken(_routes[i].from)) {
-                    // make sure to underestimate the amount out here
-                    amounts[i + 1] = getMintAmountWrappedBLT(
-                        _routes[i].from,
-                        amounts[i]
-                    );
-                    continue;
-                }
-            }
-
-            // if it's not depositing or withdrawing from wBLT, we can treat it like normal
-            address pool = poolFor(
-                _routes[i].from,
-                _routes[i].to,
-                _routes[i].stable
-            );
-            if (IPoolFactory(defaultFactory).isPool(pool)) {
-                amounts[i + 1] = IPool(pool).getAmountOut(
-                    amounts[i],
-                    _routes[i].from
-                );
-            }
-        }
-    }
-
-    /**
-     * @notice Swap wBLT or our pooled token for ether.
-     * @param _amountIn The amount of our first token to swap.
-     * @param _amountOutMin Minimum amount of ether we must receive.
-     * @param _routes Array of structs that we use for our swap path.
-     * @param _to Address that will receive the ether.
-     * @param _deadline Deadline for transaction to complete.
-     * @return amounts Amount of each token in the swap path.
-     */
-    function swapExactTokensForETH(
-        uint256 _amountIn,
-        uint256 _amountOutMin,
-        Route[] calldata _routes,
-        address _to,
-        uint256 _deadline
-    ) external ensure(_deadline) returns (uint256[] memory amounts) {
-        amounts = getAmountsOut(_amountIn, _routes);
-        require(
-            amounts[amounts.length - 1] >= _amountOutMin,
-            "Router: INSUFFICIENT_OUTPUT_AMOUNT"
-        );
-        require(
-            _routes[_routes.length - 1].to == address(weth),
-            "Router: END_ROUTE_IN_ETH_BOZO"
-        );
-
-        // if our first pool is mint/burn of wBLT, transfer to the router
-        if (
-            _routes[0].from == address(wBLT) || _routes[0].to == address(wBLT)
-        ) {
-            if (_isBLTToken(_routes[0].from) || _isBLTToken(_routes[0].to)) {
-                _safeTransferFrom(
-                    _routes[0].from,
-                    msg.sender,
-                    address(this),
-                    amounts[0]
-                );
-            } else {
-                // if it's not wBLT AND an underlying, it's just a normal wBLT swap (likely w/ BMX)
-                _safeTransferFrom(
-                    _routes[0].from,
-                    msg.sender,
-                    poolFor(_routes[0].from, _routes[0].to, _routes[0].stable),
-                    amounts[0]
-                );
-            }
-        } else {
-            _safeTransferFrom(
-                _routes[0].from,
-                msg.sender,
-                poolFor(_routes[0].from, _routes[0].to, _routes[0].stable),
-                amounts[0]
-            );
-        }
-
-        _swap(amounts, _routes, address(this));
-
-        // WETH -> ETH
-        uint256 amountUnderlying = weth.balanceOf(address(this));
-        weth.withdraw(amountUnderlying);
-        _safeTransferETH(_to, amountUnderlying);
-    }
-
-    /**
-     * @notice Swap ETH for tokens, with special handling for wBLT pools.
-     * @param _amountIn The amount of ether to swap.
-     * @param _amountOutMin Minimum amount of our final token we must receive.
-     * @param _routes Array of structs that we use for our swap path.
-     * @param _to Address that will receive the final token in the swap path.
-     * @param _deadline Deadline for transaction to complete.
-     * @return amounts Amount of each token in the swap path.
-     */
-    function swapExactETHForTokens(
-        uint256 _amountIn,
-        uint256 _amountOutMin,
-        Route[] calldata _routes,
-        address _to,
-        uint256 _deadline
-    ) public payable ensure(_deadline) returns (uint256[] memory amounts) {
-        amounts = getAmountsOut(_amountIn, _routes);
-        require(
-            amounts[amounts.length - 1] >= _amountOutMin,
-            "Router: INSUFFICIENT_OUTPUT_AMOUNT"
-        );
-
-        // deposit to weth first
-        weth.deposit{value: _amountIn}();
-        if (weth.balanceOf(address(this)) != _amountIn) {
-            revert("WETH not sent");
-        }
-
-        if (
-            _routes[0].from != address(weth) || _routes[0].to != address(wBLT)
-        ) {
-            revert("Route must start WETH -> wBLT");
-        }
-
-        _swap(amounts, _routes, _to);
-    }
-
-    /**
-     * @notice Swap tokens for tokens, with special handling for wBLT pools.
-     * @param _amountIn The amount of our first token to swap.
-     * @param _amountOutMin Minimum amount of our final token we must receive.
-     * @param _routes Array of structs that we use for our swap path.
-     * @param _to Address that will receive the final token in the swap path.
-     * @param _deadline Deadline for transaction to complete.
-     * @return amounts Amount of each token in the swap path.
-     */
-    function swapExactTokensForTokens(
-        uint256 _amountIn,
-        uint256 _amountOutMin,
-        Route[] calldata _routes,
-        address _to,
-        uint256 _deadline
-    ) external ensure(_deadline) returns (uint256[] memory amounts) {
-        amounts = getAmountsOut(_amountIn, _routes);
-        require(
-            amounts[amounts.length - 1] >= _amountOutMin,
-            "Router: INSUFFICIENT_OUTPUT_AMOUNT"
-        );
-
-        // if our first pool is mint/burn of wBLT, transfer to the router
-        if (
-            _routes[0].from == address(wBLT) || _routes[0].to == address(wBLT)
-        ) {
-            if (_isBLTToken(_routes[0].from) || _isBLTToken(_routes[0].to)) {
-                _safeTransferFrom(
-                    _routes[0].from,
-                    msg.sender,
-                    address(this),
-                    amounts[0]
-                );
-            } else {
-                // if it's not wBLT AND an underlying, it's just a normal wBLT swap (likely w/ BMX)
-                _safeTransferFrom(
-                    _routes[0].from,
-                    msg.sender,
-                    poolFor(_routes[0].from, _routes[0].to, _routes[0].stable),
-                    amounts[0]
-                );
-            }
-        } else {
-            _safeTransferFrom(
-                _routes[0].from,
-                msg.sender,
-                poolFor(_routes[0].from, _routes[0].to, _routes[0].stable),
-                amounts[0]
-            );
-        }
-
-        _swap(amounts, _routes, _to);
-    }
-
-    // **** SWAP ****
-    // requires the initial amount to have already been sent to the first pool or in this case, our underlying or wBLT
-    //  to have been sent to the router
-    function _swap(
-        uint256[] memory _amounts,
-        Route[] memory _routes,
-        address _to
-    ) internal virtual {
-        for (uint256 i = 0; i < _routes.length; i++) {
-            (address token0, ) = sortTokens(_routes[i].from, _routes[i].to);
-            uint256 amountOut = _amounts[i + 1];
-            (uint256 amount0Out, uint256 amount1Out) = _routes[i].from == token0
-                ? (uint256(0), amountOut)
-                : (amountOut, uint256(0));
-
-            // only if we're doing a wBLT deposit/withdrawal in the middle of a route
-            bool directSend;
-            uint256 received;
-            address to;
-
-            // check if we need to convert to or from wBLT
-            if (_routes[i].from == address(wBLT)) {
-                // check to see if it's one of the tokens in BLT
-                if (_isBLTToken(_routes[i].to)) {
-                    received = _withdrawFromWrappedBLT(_routes[i].to);
-                    if (i < (_routes.length - 1)) {
-                        // if we're not done, send our underlying to the next pool
-                        directSend = true;
-                    } else {
-                        // if this is the last token, send to our _to address
-                        _safeTransfer(_routes[i].to, _to, received);
-                        return;
-                    }
-                }
-            } else if (_routes[i].to == address(wBLT)) {
-                // check to make sure it's one of the tokens in BLT
-                if (_isBLTToken(_routes[i].from)) {
-                    received = _depositToWrappedBLT(_routes[i].from);
-                    if (i < (_routes.length - 1)) {
-                        // if we're not done, directly send our wBLT to the next pool
-                        directSend = true;
-                    } else {
-                        // if this is the last token, send to our _to address
-                        _safeTransfer(_routes[i].to, _to, received);
-                        return;
-                    }
-                }
-            }
-
-            if (i == _routes.length - 1) {
-                // end of the route, send to the receiver
-                to = _to;
-            } else if (
-                (_isBLTToken(_routes[i + 1].from) &&
-                    _routes[i + 1].to == address(wBLT)) ||
-                (_isBLTToken(_routes[i + 1].to) &&
-                    _routes[i + 1].from == address(wBLT))
-            ) {
-                // if we're about to go underlying -> wBLT or wBLT -> underlying, then make sure we get our needed token
-                //  back to the router
-                to = address(this);
-            } else {
-                // normal mid-route swap
-                to = poolFor(
-                    _routes[i + 1].from,
-                    _routes[i + 1].to,
-                    _routes[i + 1].stable
-                );
-            }
-
-            if (directSend) {
-                _safeTransfer(_routes[i].to, to, received);
-            } else {
-                IPool(
-                    poolFor(_routes[i].from, _routes[i].to, _routes[i].stable)
-                ).swap(amount0Out, amount1Out, to, new bytes(0));
-            }
         }
     }
 
@@ -652,6 +349,38 @@ contract wBLTRouterV2 is Ownable2Step {
         return false;
     }
 
+    /**
+     * @notice Withdraws a specified amount of wBLT to a target underlying token.
+     * @param _receiver The address to receive underlying tokens to.
+     * @param _targetToken The address of the target token to which the wBLT is withdrawn.
+     * @param _amount The amount of wBLT to withdraw.
+     * @return amountWithdrawn The amount of target tokens received from the withdrawal.
+     */
+    function withdrawFromWrappedBLT(
+        address _receiver,
+        address _targetToken,
+        uint256 _amount
+    ) external returns (uint256) {
+        // Transfer wBLT from the user to the router
+        _safeTransferFrom(address(wBLT), msg.sender, address(this), _amount);
+
+        if (!_isBLTToken(_targetToken)) {
+            revert("Token not in wBLT");
+        }
+
+        // withdraw from the vault first, make sure it comes here
+        uint256 toWithdraw = wBLT.withdraw(type(uint256).max, address(this));
+
+        // withdraw our targetToken
+        return
+            rewardRouter.unstakeAndRedeemSlt(
+                _targetToken,
+                toWithdraw,
+                0,
+                _receiver
+            );
+    }
+
     // withdraw all of the wBLT we have to a given underlying token
     function _withdrawFromWrappedBLT(
         address _targetToken
@@ -665,12 +394,44 @@ contract wBLTRouterV2 is Ownable2Step {
 
         // withdraw our targetToken
         return
-            rewardRouter.unstakeAndRedeemGlp(
+            rewardRouter.unstakeAndRedeemSlt(
                 _targetToken,
                 toWithdraw,
                 0,
                 address(this)
             );
+    }
+
+    /**
+     * @notice Deposits a specified amount of an underlying token to wBLT.
+     * @param _receiver The address to receive underlying tokens to.
+     * @param _fromToken The address of the token to be deposited to wBLT.
+     * @param _amount The amount of the token to deposit.
+     * @return amountReceived The amount of wBLT received from the deposit.
+     */
+    function depositToWrappedBLT(
+        address _receiver,
+        address _fromToken,
+        uint256 _amount
+    ) external returns (uint256 amountReceived) {
+        // Transfer the _fromToken from the user to the contract
+        _safeTransferFrom(_fromToken, msg.sender, address(this), _amount);
+
+        if (!_isBLTToken(_fromToken)) {
+            revert("Token not in wBLT");
+        }
+
+        // deposit to BLT and then the vault
+        IERC20 token = IERC20(_fromToken);
+        uint256 newMlp = rewardRouter.mintAndStakeSlt(
+            address(_fromToken),
+            token.balanceOf(address(this)),
+            0,
+            0
+        );
+
+        // specify that user should get the vault tokens
+        amountReceived = wBLT.deposit(newMlp, _receiver);
     }
 
     // deposit all of the underlying we have to wBLT
@@ -683,7 +444,7 @@ contract wBLTRouterV2 is Ownable2Step {
 
         // deposit to BLT and then the vault
         IERC20 token = IERC20(_fromToken);
-        uint256 newMlp = rewardRouter.mintAndStakeGlp(
+        uint256 newMlp = rewardRouter.mintAndStakeSlt(
             address(_fromToken),
             token.balanceOf(address(this)),
             0,
@@ -692,135 +453,5 @@ contract wBLTRouterV2 is Ownable2Step {
 
         // specify that router should get the vault tokens
         tokens = wBLT.deposit(newMlp, address(this));
-    }
-
-    /* ========== AERODROME-SPECIFIC FUNCTIONS ========== */
-
-    function poolFor(
-        address _tokenA,
-        address _tokenB,
-        bool _stable
-    ) public view returns (address pool) {
-        (address token0, address token1) = sortTokens(_tokenA, _tokenB);
-        bytes32 salt = keccak256(abi.encodePacked(token0, token1, _stable));
-        pool = Clones.predictDeterministicAddress(
-            IPoolFactory(defaultFactory).implementation(),
-            salt,
-            defaultFactory
-        );
-    }
-
-    /* ========== UNMODIFIED V1 FUNCTIONS ========== */
-
-    function sortTokens(
-        address _tokenA,
-        address _tokenB
-    ) public pure returns (address token0, address token1) {
-        require(_tokenA != _tokenB, "Router: IDENTICAL_ADDRESSES");
-        (token0, token1) = _tokenA < _tokenB
-            ? (_tokenA, _tokenB)
-            : (_tokenB, _tokenA);
-        require(token0 != address(0), "Router: ZERO_ADDRESS");
-    }
-
-    // fetches and sorts the reserves for a pool
-    function getReserves(
-        address _tokenA,
-        address _tokenB,
-        bool _stable
-    ) public view returns (uint256 reserveA, uint256 reserveB) {
-        (address token0, ) = sortTokens(_tokenA, _tokenB);
-        (uint256 reserve0, uint256 reserve1, ) = IPool(
-            poolFor(_tokenA, _tokenB, _stable)
-        ).getReserves();
-        (reserveA, reserveB) = _tokenA == token0
-            ? (reserve0, reserve1)
-            : (reserve1, reserve0);
-    }
-
-    // determine whether to use stable or volatile pools for a given pool of tokens
-    function getAmountOut(
-        uint256 _amountIn,
-        address _tokenIn,
-        address _tokenOut
-    ) public view returns (uint256 amount, bool stable) {
-        address pool = poolFor(_tokenIn, _tokenOut, true);
-        uint256 amountStable;
-        uint256 amountVolatile;
-        if (IPoolFactory(defaultFactory).isPool(pool)) {
-            amountStable = IPool(pool).getAmountOut(_amountIn, _tokenIn);
-        }
-        pool = poolFor(_tokenIn, _tokenOut, false);
-        if (IPoolFactory(defaultFactory).isPool(pool)) {
-            amountVolatile = IPool(pool).getAmountOut(_amountIn, _tokenIn);
-        }
-        return
-            amountStable > amountVolatile
-                ? (amountStable, true)
-                : (amountVolatile, false);
-    }
-
-    //@override
-    //getAmountOut	:	bool stable
-    //Gets exact output for specific pool-type(S|V)
-    function getAmountOut(
-        uint256 _amountIn,
-        address _tokenIn,
-        address _tokenOut,
-        bool _stable
-    ) public view returns (uint256 amount) {
-        address pool = poolFor(_tokenIn, _tokenOut, _stable);
-        if (IPoolFactory(defaultFactory).isPool(pool)) {
-            amount = IPool(pool).getAmountOut(_amountIn, _tokenIn);
-        }
-    }
-
-    // given some amount of an asset and pool reserves, returns an equivalent amount of the other asset
-    function _quoteLiquidity(
-        uint256 _amountA,
-        uint256 _reserveA,
-        uint256 _reserveB
-    ) internal pure returns (uint256 amountB) {
-        require(_amountA > 0, "Router: INSUFFICIENT_AMOUNT");
-        require(
-            _reserveA > 0 && _reserveB > 0,
-            "Router: INSUFFICIENT_LIQUIDITY"
-        );
-        amountB = (_amountA * _reserveB) / _reserveA;
-    }
-
-    function _safeTransferETH(address _to, uint256 _value) internal {
-        (bool success, ) = _to.call{value: _value}(new bytes(0));
-        require(success, "TransferHelper: ETH_TRANSFER_FAILED");
-    }
-
-    function _safeTransfer(
-        address _token,
-        address _to,
-        uint256 _value
-    ) internal {
-        require(_token.code.length > 0);
-        (bool success, bytes memory data) = _token.call(
-            abi.encodeWithSelector(IERC20.transfer.selector, _to, _value)
-        );
-        require(success && (data.length == 0 || abi.decode(data, (bool))));
-    }
-
-    function _safeTransferFrom(
-        address _token,
-        address _from,
-        address _to,
-        uint256 _value
-    ) internal {
-        require(_token.code.length > 0);
-        (bool success, bytes memory data) = _token.call(
-            abi.encodeWithSelector(
-                IERC20.transferFrom.selector,
-                _from,
-                _to,
-                _value
-            )
-        );
-        require(success && (data.length == 0 || abi.decode(data, (bool))));
     }
 }
