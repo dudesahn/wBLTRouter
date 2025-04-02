@@ -349,6 +349,27 @@ contract wSLTRouter is Ownable2Step {
         return false;
     }
 
+    // withdraw all of the wBLT we have to a given underlying token
+    function _withdrawFromWrappedBLT(
+        address _targetToken
+    ) internal returns (uint256) {
+        if (!_isBLTToken(_targetToken)) {
+            revert("Token not in wBLT");
+        }
+
+        // withdraw from the vault first, make sure it comes here
+        uint256 toWithdraw = wBLT.withdraw(type(uint256).max, address(this));
+
+        // withdraw our targetToken
+        return
+            rewardRouter.unstakeAndRedeemSlt(
+                _targetToken,
+                toWithdraw,
+                0,
+                address(this)
+            );
+    }
+
     /**
      * @notice Withdraws a specified amount of wBLT to a target underlying token.
      * @param _receiver The address to receive underlying tokens to.
@@ -381,25 +402,25 @@ contract wSLTRouter is Ownable2Step {
             );
     }
 
-    // withdraw all of the wBLT we have to a given underlying token
-    function _withdrawFromWrappedBLT(
-        address _targetToken
-    ) internal returns (uint256) {
-        if (!_isBLTToken(_targetToken)) {
+    // deposit all of the underlying we have to wBLT
+    function _depositToWrappedBLT(
+        address _fromToken
+    ) internal returns (uint256 tokens) {
+        if (!_isBLTToken(_fromToken)) {
             revert("Token not in wBLT");
         }
 
-        // withdraw from the vault first, make sure it comes here
-        uint256 toWithdraw = wBLT.withdraw(type(uint256).max, address(this));
+        // deposit to BLT and then the vault
+        IERC20 token = IERC20(_fromToken);
+        uint256 newMlp = rewardRouter.mintAndStakeSlt(
+            address(_fromToken),
+            token.balanceOf(address(this)),
+            0,
+            0
+        );
 
-        // withdraw our targetToken
-        return
-            rewardRouter.unstakeAndRedeemSlt(
-                _targetToken,
-                toWithdraw,
-                0,
-                address(this)
-            );
+        // specify that router should get the vault tokens
+        tokens = wBLT.deposit(newMlp, address(this));
     }
 
     /**
@@ -434,24 +455,23 @@ contract wSLTRouter is Ownable2Step {
         amountReceived = wBLT.deposit(newMlp, _receiver);
     }
 
-    // deposit all of the underlying we have to wBLT
-    function _depositToWrappedBLT(
-        address _fromToken
-    ) internal returns (uint256 tokens) {
-        if (!_isBLTToken(_fromToken)) {
-            revert("Token not in wBLT");
-        }
+    /* ========== UNMODIFIED FUNCTIONS ========== */
 
-        // deposit to BLT and then the vault
-        IERC20 token = IERC20(_fromToken);
-        uint256 newMlp = rewardRouter.mintAndStakeSlt(
-            address(_fromToken),
-            token.balanceOf(address(this)),
-            0,
-            0
+    function _safeTransferFrom(
+        address _token,
+        address _from,
+        address _to,
+        uint256 _value
+    ) internal {
+        require(_token.code.length > 0);
+        (bool success, bytes memory data) = _token.call(
+            abi.encodeWithSelector(
+                IERC20.transferFrom.selector,
+                _from,
+                _to,
+                _value
+            )
         );
-
-        // specify that router should get the vault tokens
-        tokens = wBLT.deposit(newMlp, address(this));
+        require(success && (data.length == 0 || abi.decode(data, (bool))));
     }
 }
